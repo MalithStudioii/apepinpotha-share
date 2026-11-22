@@ -34,21 +34,6 @@ function escapeHtml(str) {
 }
 
 /**
- * Escapes characters for safe inclusion in inline JavaScript strings
- * @param {string} str
- * @returns {string}
- */
-function escapeJs(str) {
-  if (!str) return "";
-  return String(str)
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r");
-}
-
-/**
  * Recursively parses Firestore REST API typed values into standard JavaScript values
  * @param {Object} val
  * @returns {*}
@@ -117,6 +102,32 @@ function findFirstValidImageUrl(candidates) {
     }
   }
   return null;
+}
+
+/**
+ * Optimizes image URL for social previews (1200x630, auto eco quality, JPEG)
+ * If URL is from Cloudinary and has no transformation params, injects transformation segment.
+ * @param {string} url
+ * @returns {string}
+ */
+function optimizeOgImage(url) {
+  if (!url || typeof url !== "string") return DEFAULT_IMAGE;
+  const trimmed = url.trim();
+  if (!trimmed.includes("res.cloudinary.com")) return trimmed;
+
+  const uploadMarker = "/image/upload/";
+  const uploadIdx = trimmed.indexOf(uploadMarker);
+  if (uploadIdx === -1) return trimmed;
+
+  const afterUpload = trimmed.substring(uploadIdx + uploadMarker.length);
+  // Check if transformation segment is already present (e.g. w_, c_, q_, f_, or compound)
+  const hasTransform = /^(?:[a-z]_[a-zA-Z0-9_:,]+|\w+,\w+)\//.test(afterUpload);
+  if (!hasTransform) {
+    const transform = "w_1200,h_630,c_fill,q_auto:eco,f_jpg/";
+    return trimmed.substring(0, uploadIdx + uploadMarker.length) + transform + afterUpload;
+  }
+
+  return trimmed;
 }
 
 /**
@@ -267,12 +278,13 @@ module.exports = async (req, res) => {
     pageDescription = `${pageDescription.substring(0, 297)}...`;
   }
 
+  const optimizedImage = optimizeOgImage(imageUrl);
+
   const safeTitle = escapeHtml(pageTitle);
   const safeDesc = escapeHtml(pageDescription);
-  const safeImage = escapeHtml(imageUrl);
+  const safeImage = escapeHtml(optimizedImage);
   const safeUrl = escapeHtml(canonicalUrl);
   const safeRedirectUrl = escapeHtml(redirectUrl);
-  const safeJsRedirect = escapeJs(redirectUrl);
 
   const html = `<!DOCTYPE html>
 <html lang="si">
@@ -289,6 +301,8 @@ module.exports = async (req, res) => {
   <meta property="og:title" content="${safeTitle}">
   <meta property="og:description" content="${safeDesc}">
   <meta property="og:image" content="${safeImage}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="${safeTitle}">
   <meta property="og:url" content="${safeUrl}">
 
@@ -297,10 +311,6 @@ module.exports = async (req, res) => {
   <meta name="twitter:title" content="${safeTitle}">
   <meta name="twitter:description" content="${safeDesc}">
   <meta name="twitter:image" content="${safeImage}">
-
-  <!-- Client-side Fallback Redirect for unexpected human visits -->
-  <meta http-equiv="refresh" content="0;url=${safeRedirectUrl}">
-  <script>window.location.replace('${safeJsRedirect}');</script>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 40px 20px; background: #fffdf8; color: #78350f;">
   <p>ප්‍රධාන වෙබ් අඩවිය වෙත පිවිසෙමින් පවතී...</p>
