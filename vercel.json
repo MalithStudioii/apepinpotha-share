@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/a/:id",
+      "destination": "/api/share?type=a&id=:id"
+    },
+    {
+      "source": "/p/:id",
+      "destination": "/api/share?type=p&id=:id"
+    }
+  ],
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "https://apepinpotha.lk",
+      "permanent": false
+    }
+  ]
+}
