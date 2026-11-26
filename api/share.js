@@ -12,25 +12,315 @@
 const FIREBASE_PROJECT_ID = "pin-ketha-app";
 const SITE_ORIGIN = "https://apepinpotha.lk";
 const SHARE_ORIGIN = "https://share.apepinpotha.lk";
-const DEFAULT_IMAGE = "https://apepinpotha.lk/assets/banner.jpg";
+const DEFAULT_IMAGE = "https://apepinpotha.lk/assets/og-banner.jpg";
+const ARTISAN_DEFAULT_IMAGE = "https://apepinpotha.lk/assets/artisan-banner-buddha.webp";
 const SITE_NAME = "අපේ පිං පොත - Ape Pin Potha";
 
 // Regex detecting major social media link preview bots and crawlers
 const BOT_UA_REGEX = /facebookexternalhit|Facebot|WhatsApp|Twitterbot|TelegramBot|LinkedInBot|Slackbot|Discordbot|Pinterest|Googlebot|bingbot|Applebot|viber/i;
 
+const GENERIC_TITLES = ["පින්කම", "සටහන", "පින්කමක්", "සටහනක්", "merit", "post", "untitled"];
+
 /**
- * Escapes characters for safe inclusion in HTML attributes and content
+ * Normalizes Unicode string (NFC) and removes stray/unpaired surrogates to prevent '?' replacement boxes
+ * @param {string} str
+ * @returns {string}
+ */
+function cleanUnicodeString(str) {
+  if (!str) return "";
+  let s = String(str).normalize("NFC");
+  // Strip unpaired surrogates so emojis never corrupt into '?'
+  s = s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+  return s;
+}
+
+/**
+ * Slices string by full Unicode code points (graphemes), never splitting emoji surrogate pairs
+ * @param {string} str
+ * @param {number} maxLen
+ * @returns {string}
+ */
+function safeUnicodeSlice(str, maxLen = 120) {
+  if (!str) return "";
+  const cleaned = cleanUnicodeString(str);
+  const codePoints = Array.from(cleaned);
+  if (codePoints.length <= maxLen) {
+    return cleaned;
+  }
+  const sliced = codePoints.slice(0, maxLen).join("");
+  const lastSpace = sliced.lastIndexOf(" ");
+  if (lastSpace > Math.floor(maxLen * 0.55)) {
+    return sliced.substring(0, lastSpace).trim() + "...";
+  }
+  return sliced.trim() + "...";
+}
+
+/**
+ * Escapes characters for safe inclusion in HTML attributes and content while keeping UTF-8 emojis intact
  * @param {string} str
  * @returns {string}
  */
 function escapeHtml(str) {
   if (!str) return "";
-  return String(str)
+  return cleanUnicodeString(str)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/**
+ * Determines MIME type for social preview meta tags
+ * @param {string} url
+ * @returns {string}
+ */
+function getMimeType(url) {
+  if (!url) return "image/jpeg";
+  const clean = url.split("?")[0].toLowerCase();
+  if (clean.endsWith(".png")) return "image/png";
+  if (clean.endsWith(".webp")) return "image/webp";
+  if (clean.endsWith(".gif")) return "image/gif";
+  return "image/jpeg";
+}
+
+/**
+ * Normalizes candidate image source into a valid, absolute HTTPS URL
+ * @param {*} candidate
+ * @returns {string|null}
+ */
+function normalizeImageUrl(candidate) {
+  if (!candidate) return null;
+  let str = "";
+  if (typeof candidate === "string") {
+    str = candidate.trim();
+  } else if (typeof candidate === "object") {
+    const u = candidate.url || candidate.imageUrl || candidate.secure_url || candidate.src;
+    if (typeof u === "string") str = u.trim();
+  }
+  if (!str) return null;
+
+  if (str.startsWith("http://")) {
+    str = "https://" + str.slice(7);
+  } else if (str.startsWith("//")) {
+    str = "https:" + str;
+  } else if (str.startsWith("/")) {
+    str = `${SITE_ORIGIN}${str}`;
+  } else if (str.startsWith("assets/")) {
+    str = `${SITE_ORIGIN}/${str}`;
+  } else if (!str.startsWith("https://")) {
+    str = `${SITE_ORIGIN}/${str}`;
+  }
+
+  try {
+    const parsed = new URL(str);
+    if (parsed.protocol === "https:") {
+      return parsed.href;
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+/**
+ * Recursively inspects candidates and returns the first valid absolute HTTPS image URL
+ * @param {Array<*>} candidates
+ * @returns {string|null}
+ */
+function findFirstValidImageUrl(candidates) {
+  if (!Array.isArray(candidates)) return null;
+  for (const item of candidates) {
+    if (!item) continue;
+    if (typeof item === "string") {
+      const normalized = normalizeImageUrl(item);
+      if (normalized) return normalized;
+    } else if (Array.isArray(item)) {
+      const nested = findFirstValidImageUrl(item);
+      if (nested) return nested;
+    } else if (typeof item === "object") {
+      const normalized = normalizeImageUrl(item);
+      if (normalized) return normalized;
+    }
+  }
+  return null;
+}
+
+/**
+ * Optimizes image URL for social previews (1200x630, auto eco quality, JPEG)
+ * If URL is from Cloudinary and has no transformation params, injects transformation segment.
+ * @param {string} url
+ * @returns {string}
+ */
+function optimizeOgImage(url) {
+  if (!url || typeof url !== "string") return DEFAULT_IMAGE;
+  const trimmed = url.trim();
+  if (!trimmed.includes("res.cloudinary.com")) return trimmed;
+
+  const uploadMarker = "/image/upload/";
+  const uploadIdx = trimmed.indexOf(uploadMarker);
+  if (uploadIdx === -1) return trimmed;
+
+  const afterUpload = trimmed.substring(uploadIdx + uploadMarker.length);
+  const hasTransform = /^(?:[a-z]_[a-zA-Z0-9_:,]+|\w+,\w+)\//.test(afterUpload);
+  if (!hasTransform) {
+    const transform = "w_1200,h_630,c_fill,q_auto:eco,f_jpg/";
+    return trimmed.substring(0, uploadIdx + uploadMarker.length) + transform + afterUpload;
+  }
+
+  return trimmed;
+}
+
+/**
+ * Maps post category and type to clean, contextual Sinhala badge and emoji
+ * @param {Object} docData
+ * @returns {string}
+ */
+function getPostCategoryBadge(docData) {
+  if (!docData || typeof docData !== "object") return "🌸 උතුම් පින්කමක්";
+
+  const type = String(docData.type || "").trim().toLowerCase();
+  const isNeed = Boolean(
+    type === "need" ||
+    type === "sathkara" ||
+    type === "care" ||
+    docData.category === "සමාජ සත්කාර" ||
+    docData.isNeed === true ||
+    docData.isVerifiedNeed === true
+  );
+  if (isNeed) return "🤝 සත්කාර ඉල්ලීමක්";
+
+  if (type === "reel" || Boolean(docData.isShorts || docData.videoId)) {
+    return "🎬 සදහම් වීඩියෝවක්";
+  }
+
+  if (docData.isRepost || type === "repost" || Boolean(docData.originalPost)) {
+    return "🔁 යළි බෙදාගත් සටහනක්";
+  }
+
+  const cat = String(docData.category || "").trim();
+  switch (cat) {
+    case "දානමය":
+      return "🍲 දානමය පින්කමක්";
+    case "ශීලමය":
+      return "🪷 ශීලමය පින්කමක්";
+    case "භාවනාමය":
+      return "🧘 භාවනාමය පින්කමක්";
+    case "ධර්ම දානමය":
+      return "📖 ධර්ම දානයක්";
+    case "වන්දනා":
+    case "වන්දනාමය":
+      return "🛕 වන්දනාමය පින්කමක්";
+    case "බෝධි පූජා":
+      return "🍃 බෝධි පූජා පින්කමක්";
+    case "කඨින":
+      return "🪷 කඨින මහා පින්කමක්";
+    case "ප්‍රතිසංස්කරණ":
+    case "විහාර නිර්මාණ":
+      return "🏛️ විහාර නිර්මාණයක්";
+    case "සමාජ සත්කාර":
+    case "සත්කාර":
+      return "🤝 සමාජ සත්කාරයක්";
+    case "සිතුවිලි":
+      return "💭 සදහම් සිතුවිල්ලක්";
+    case "සුබපැතුම්":
+      return "✨ සදහම් සුබපැතුමක්";
+    case "සාමාන්‍ය":
+    case "සාමාන්ය":
+      return "🌸 පුණ්‍ය සටහනක්";
+    default:
+      if (type === "merit") return "🌸 උතුම් පින්කමක්";
+      return "🌸 පුණ්‍ය සටහනක්";
+  }
+}
+
+/**
+ * Extracts a concise, meaningful topic snippet from post title or content
+ * @param {Object} docData
+ * @param {number} maxLen
+ * @returns {string}
+ */
+function extractTopicSnippet(docData, maxLen = 50) {
+  if (!docData) return "උතුම් පුණ්‍ය සටහනක්";
+
+  let raw = "";
+  const rawTitle = String(docData.title || "").replace(/<[^>]*>?/gm, "").trim();
+  if (rawTitle && rawTitle.length >= 2 && !GENERIC_TITLES.includes(rawTitle.toLowerCase())) {
+    raw = rawTitle;
+  } else {
+    const rawDesc = String(docData.description || docData.content || docData.text || "").replace(/<[^>]*>?/gm, "").trim();
+    if (rawDesc) raw = rawDesc;
+  }
+
+  if (!raw) return "උතුම් පුණ්‍ය සටහනක්";
+
+  const clean = raw
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return safeUnicodeSlice(clean, maxLen);
+}
+
+/**
+ * Builds a natural, informative Sinhala summary for Open Graph description
+ * @param {Object} docData
+ * @param {number} maxLen
+ * @returns {string}
+ */
+function extractPostDescription(docData, maxLen = 160) {
+  if (!docData) {
+    return "අපේ පිං පොත (apepinpotha.lk) ඩිජිටල් පුණ්‍ය ජාලය ඔස්සේ උතුම් පින්කම් දැකබලා සාදුකාර දී අනුමෝදන් වන්න.";
+  }
+
+  const rawDesc = String(docData.description || docData.content || docData.text || "")
+    .replace(/<[^>]*>?/gm, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const rawTitle = String(docData.title || "").replace(/<[^>]*>?/gm, "").trim();
+  let clean = rawDesc;
+
+  // Strip duplicate leading title
+  if (rawTitle && clean.toLowerCase().startsWith(rawTitle.toLowerCase())) {
+    clean = clean.substring(rawTitle.length).replace(/^[\s:;.-]+/, "").trim();
+  }
+
+  const isNeed = Boolean(
+    docData.type === "need" ||
+    docData.type === "sathkara" ||
+    docData.type === "care" ||
+    docData.category === "සමාජ සත්කාර" ||
+    docData.isNeed === true ||
+    docData.isVerifiedNeed === true
+  );
+
+  if (!clean || clean.length < 15) {
+    const author = docData.isOfficial ? "අපේ පිං පොත" : (docData.author || docData.authorName || "කල්‍යාණ මිත්‍රයෙක්");
+    if (isNeed) {
+      const contact = (docData.contact || docData.contactNumber || docData.phone || "").trim();
+      const contactStr = contact ? ` විමසීම්: ${contact}.` : "";
+      return `විහාරස්ථාන සහ සමාජ සත්කාර සඳහා සිදු කරන කාරුණික ඇරයුමකි.${contactStr} වැඩිදුර විස්තර සඳහා පිවිසෙන්න.`;
+    }
+    return `${author} විසින් අපේ පිං පොත (apepinpotha.lk) වෙත එක් කළ උතුම් සටහනකි. සාදු සිතින් අනුමෝදන් වන්න.`;
+  }
+
+  if (isNeed) {
+    const contact = (docData.contact || docData.contactNumber || docData.phone || "").trim();
+    if (contact && !clean.includes(contact)) {
+      const suffix = ` (විමසීම්: ${contact})`;
+      const targetLen = maxLen - suffix.length;
+      return safeUnicodeSlice(clean, targetLen) + suffix;
+    }
+  }
+
+  return safeUnicodeSlice(clean, maxLen);
 }
 
 /**
@@ -76,61 +366,6 @@ function parseFirestoreDoc(doc) {
 }
 
 /**
- * Recursively inspects candidates and returns the first valid HTTP/HTTPS image URL
- * @param {Array<*>} candidates
- * @returns {string|null}
- */
-function findFirstValidImageUrl(candidates) {
-  if (!Array.isArray(candidates)) return null;
-  for (const item of candidates) {
-    if (!item) continue;
-    if (typeof item === "string") {
-      const trimmed = item.trim();
-      if (/^https?:\/\//i.test(trimmed)) {
-        return trimmed;
-      }
-    } else if (typeof item === "object") {
-      if (Array.isArray(item)) {
-        const nested = findFirstValidImageUrl(item);
-        if (nested) return nested;
-      } else {
-        const u = item.url || item.imageUrl || item.secure_url || item.src;
-        if (typeof u === "string" && /^https?:\/\//i.test(u.trim())) {
-          return u.trim();
-        }
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Optimizes image URL for social previews (1200x630, auto eco quality, JPEG)
- * If URL is from Cloudinary and has no transformation params, injects transformation segment.
- * @param {string} url
- * @returns {string}
- */
-function optimizeOgImage(url) {
-  if (!url || typeof url !== "string") return DEFAULT_IMAGE;
-  const trimmed = url.trim();
-  if (!trimmed.includes("res.cloudinary.com")) return trimmed;
-
-  const uploadMarker = "/image/upload/";
-  const uploadIdx = trimmed.indexOf(uploadMarker);
-  if (uploadIdx === -1) return trimmed;
-
-  const afterUpload = trimmed.substring(uploadIdx + uploadMarker.length);
-  // Check if transformation segment is already present (e.g. w_, c_, q_, f_, or compound)
-  const hasTransform = /^(?:[a-z]_[a-zA-Z0-9_:,]+|\w+,\w+)\//.test(afterUpload);
-  if (!hasTransform) {
-    const transform = "w_1200,h_630,c_fill,q_auto:eco,f_jpg/";
-    return trimmed.substring(0, uploadIdx + uploadMarker.length) + transform + afterUpload;
-  }
-
-  return trimmed;
-}
-
-/**
  * Fetches a Firestore document via public REST API with timeout
  * @param {string} collection
  * @param {string} id
@@ -161,15 +396,20 @@ module.exports = async (req, res) => {
   const rawId = String(query.id || "").trim();
   const userAgent = String(req.headers["user-agent"] || "");
 
+  let cleanId = rawId;
+  try {
+    cleanId = decodeURIComponent(rawId);
+  } catch (e) {}
+
   // Determine target human redirect destination on the main website
   let redirectUrl = SITE_ORIGIN;
   let canonicalUrl = SHARE_ORIGIN;
-  if (type === "a" && rawId) {
-    redirectUrl = `${SITE_ORIGIN}/?a=${encodeURIComponent(rawId)}`;
-    canonicalUrl = `${SHARE_ORIGIN}/a/${encodeURIComponent(rawId)}`;
-  } else if (type === "p" && rawId) {
-    redirectUrl = `${SITE_ORIGIN}/?p=${encodeURIComponent(rawId)}`;
-    canonicalUrl = `${SHARE_ORIGIN}/p/${encodeURIComponent(rawId)}`;
+  if (type === "a" && cleanId) {
+    redirectUrl = `${SITE_ORIGIN}/?a=${encodeURIComponent(cleanId)}`;
+    canonicalUrl = `${SHARE_ORIGIN}/a/${encodeURIComponent(cleanId)}`;
+  } else if (type === "p" && cleanId) {
+    redirectUrl = `${SITE_ORIGIN}/?p=${encodeURIComponent(cleanId)}`;
+    canonicalUrl = `${SHARE_ORIGIN}/p/${encodeURIComponent(cleanId)}`;
   }
 
   // 1. Human visitor detection: immediately redirect to main website
@@ -184,9 +424,9 @@ module.exports = async (req, res) => {
   let pageDescription = "අපේ පිං පොත - කල්‍යාණ මිත්‍ර පුණ්‍ය ජාලය සහ ශ්‍රී ලංකා විහාර කලා හා පෙරහැර ශිල්පී නාමාවලිය.";
   let imageUrl = DEFAULT_IMAGE;
 
-  if (type === "a" && rawId) {
+  if (type === "a" && cleanId) {
     // Temple Artisans & Perahera Services Directory
-    const docData = await fetchFirestoreDoc("temple_artisans", rawId);
+    const docData = await fetchFirestoreDoc("temple_artisans", cleanId);
     if (docData) {
       const name = docData.name || docData.artisanName || "සත්‍යාපිත ශිල්පී";
       const isPerahera = docData.section === "perahera_culture";
@@ -206,7 +446,7 @@ module.exports = async (req, res) => {
       if (temples) descParts.push(`දායක වූ විහාර: ${temples}`);
 
       if (descParts.length > 0) {
-        pageDescription = descParts.join(" | ");
+        pageDescription = safeUnicodeSlice(descParts.join(" | "), 200);
       } else {
         pageDescription = "අපේ පිං පොත විහාර කලා හා පෙරහැර ශිල්පී නාමාවලිය ඔස්සේ සම්පූර්ණ පැතිකඩ සහ නිර්මාණ එකතුව (Portfolio) දැකබලා ගන්න.";
       }
@@ -221,39 +461,29 @@ module.exports = async (req, res) => {
         docData.portfolio,
         docData.images
       ]);
-      if (imgCandidate) {
-        imageUrl = imgCandidate;
-      }
+      imageUrl = imgCandidate || ARTISAN_DEFAULT_IMAGE;
     } else {
       pageTitle = "සත්‍යාපිත විහාර කලා හා පෙරහැර ශිල්පී පැතිකඩ | අපේ පිං පොත";
       pageDescription = "අපේ පිං පොත විහාර කලා හා පෙරහැර ශිල්පී නාමාවලිය ඔස්සේ සම්පූර්ණ පැතිකඩ සහ නිර්මාණ එකතුව (Portfolio) දැකබලා ගන්න.";
+      imageUrl = ARTISAN_DEFAULT_IMAGE;
     }
-  } else if (type === "p" && rawId) {
+  } else if (type === "p" && cleanId) {
     // Merit Posts & Sathkara Community Feed
-    const docData = await fetchFirestoreDoc("merit_posts", rawId);
+    const docData = await fetchFirestoreDoc("merit_posts", cleanId);
     if (docData) {
-      const isNeed = docData.type === "need";
-      const realTitle = (docData.title || "").replace(/<[^>]*>?/gm, "").trim();
+      const categoryBadge = getPostCategoryBadge(docData);
+      const topicSnippet = extractTopicSnippet(docData, 50);
       const author = docData.isOfficial
         ? "අපේ පිං පොත"
-        : (docData.author || docData.authorName || "කල්‍යාණ මිත්‍ර");
+        : (docData.author || docData.authorName || "කල්‍යාණ මිත්‍රයෙක්");
 
-      if (realTitle) {
-        pageTitle = `${isNeed ? "🤝 " : "🌸 "}${realTitle} — ${author} | අපේ පිං පොත`;
+      if (docData.isOfficial || author === "අපේ පිං පොත" || author === "අපේ පින් පොත") {
+        pageTitle = `${categoryBadge}: ${topicSnippet} | අපේ පිං පොත`;
       } else {
-        pageTitle = `${isNeed ? "🤝 විශේෂ සත්කාර ඇරයුමකි" : "🌸 උතුම් පින්කමක්"} — ${author} | අපේ පිං පොත`;
+        pageTitle = `${categoryBadge}: ${topicSnippet} — ${author} | අපේ පිං පොත`;
       }
 
-      const cleanDesc = (docData.description || docData.content || docData.text || "")
-        .replace(/<[^>]*>?/gm, "")
-        .trim();
-      if (cleanDesc) {
-        pageDescription = cleanDesc.length > 220 ? `${cleanDesc.substring(0, 217)}...` : cleanDesc;
-      } else {
-        pageDescription = isNeed
-          ? "අපේ පිං පොත සත්කාර හවුල ඔස්සේ මෙම සත්කාර ඇරයුම පිළිබඳ සම්පූර්ණ විස්තර දැකබලා දායක වන්න."
-          : "අපේ පිං පොත ඔස්සේ මෙම උතුම් පින්කම දැකබලා ඔබත් සාදුකාර දී පින් අනුමෝදන් වන්න.";
-      }
+      pageDescription = extractPostDescription(docData, 160);
 
       const imgCandidate = findFirstValidImageUrl([
         docData.image,
@@ -262,23 +492,32 @@ module.exports = async (req, res) => {
         docData.mediaUrl,
         docData.thumbnail,
         docData.videoThumbnail,
+        docData.videoThumb,
+        docData.bannerUrl,
         docData.authorPhoto
       ]);
+
       if (imgCandidate) {
         imageUrl = imgCandidate;
+      } else if (docData.category === "විහාර නිර්මාණ" || docData.category === "ප්‍රතිසංස්කරණ") {
+        imageUrl = ARTISAN_DEFAULT_IMAGE;
+      } else {
+        imageUrl = DEFAULT_IMAGE;
       }
     } else {
       pageTitle = "උතුම් පින්කමක් දැකබලා අනුමෝදන් වන්න | අපේ පිං පොත";
       pageDescription = "අපේ පිං පොත කල්‍යාණ මිත්‍ර පුණ්‍ය ජාලය ඔස්සේ උතුම් පින්කම් දැකබලා සාදුකාර දී අනුමෝදන් වන්න.";
+      imageUrl = DEFAULT_IMAGE;
     }
   }
 
   // Ensure description length does not exceed social card limit
-  if (pageDescription.length > 300) {
-    pageDescription = `${pageDescription.substring(0, 297)}...`;
+  if (pageDescription.length > 250) {
+    pageDescription = safeUnicodeSlice(pageDescription, 240);
   }
 
   const optimizedImage = optimizeOgImage(imageUrl);
+  const imageMimeType = getMimeType(optimizedImage);
 
   const safeTitle = escapeHtml(pageTitle);
   const safeDesc = escapeHtml(pageDescription);
@@ -290,6 +529,7 @@ module.exports = async (req, res) => {
 <html lang="si">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${safeTitle}</title>
   <meta name="description" content="${safeDesc}">
@@ -301,6 +541,8 @@ module.exports = async (req, res) => {
   <meta property="og:title" content="${safeTitle}">
   <meta property="og:description" content="${safeDesc}">
   <meta property="og:image" content="${safeImage}">
+  <meta property="og:image:secure_url" content="${safeImage}">
+  <meta property="og:image:type" content="${imageMimeType}">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="${safeTitle}">
@@ -318,7 +560,9 @@ module.exports = async (req, res) => {
 </body>
 </html>`;
 
-  res.setHeader("Content-Type", "text/html; charset=UTF-8");
-  res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=600");
-  return res.status(200).send(html);
+  const responseBuffer = Buffer.from(html, "utf-8");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Content-Length", responseBuffer.length);
+  res.setHeader("Cache-Control", "public, max-age=120, s-maxage=300, stale-while-revalidate=600");
+  return res.status(200).end(responseBuffer);
 };
