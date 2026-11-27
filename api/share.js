@@ -197,7 +197,7 @@ function optimizeOgImage(url) {
  * @returns {string}
  */
 function getPostCategoryBadge(docData) {
-  if (!docData || typeof docData !== "object") return "🌸 උතුම් පින්කමක්";
+  if (!docData || typeof docData !== "object") return "🌸 පුණ්‍ය සටහනක්";
 
   const type = String(docData.type || "").trim().toLowerCase();
   const isNeed = Boolean(
@@ -247,9 +247,7 @@ function getPostCategoryBadge(docData) {
       return "✨ සදහම් සුබපැතුමක්";
     case "සාමාන්‍ය":
     case "සාමාන්ය":
-      return "🌸 පුණ්‍ය සටහනක්";
     default:
-      if (type === "merit") return "🌸 උතුම් පින්කමක්";
       return "🌸 පුණ්‍ය සටහනක්";
   }
 }
@@ -522,7 +520,7 @@ module.exports = async (req, res) => {
         : (docData.author || docData.authorName || "කල්‍යාණ මිත්‍රයෙක්");
 
       // Context-aware og:title (clean emoji/category + topic hook + author + site name)
-      const isGeneralCategory = (categoryBadge === "🌸 පුණ්‍ය සටහනක්" || categoryBadge === "🌸 උතුම් පින්කමක්");
+      const isGeneralCategory = (categoryBadge === "🌸 පුණ්‍ය සටහනක්");
       if (docData.isOfficial || author === "අපේ පිං පොත" || author === "අපේ පින් පොත") {
         pageTitle = isGeneralCategory 
           ? `🌸 ${topicSnippet} | අපේ පිං පොත` 
@@ -555,8 +553,8 @@ module.exports = async (req, res) => {
         imageUrl = DEFAULT_IMAGE;
       }
     } else {
-      pageTitle = "උතුම් පින්කමක් දැකබලා අනුමෝදන් වන්න | අපේ පිං පොත";
-      pageDescription = "අපේ පිං පොත කල්‍යාණ මිත්‍ර පුණ්‍ය ජාලය ඔස්සේ උතුම් පින්කම් දැකබලා සාදුකාර දී අනුමෝදන් වන්න.";
+      pageTitle = "පුණ්‍ය සටහන දැකබලා අනුමෝදන් වන්න | අපේ පිං පොත";
+      pageDescription = "අපේ පිං පොත කල්‍යාණ මිත්‍ර පුණ්‍ය ජාලය ඔස්සේ පුණ්‍ය සටහන් දැකබලා සාදුකාර දී අනුමෝදන් වන්න.";
       imageUrl = DEFAULT_IMAGE;
     }
   }
